@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tetris — Med ljud och centrerad layout</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #111;
+      color: #eee;
+      margin: 0;
+    }
+    .container {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    .board {
+      background: #111;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.4);
+    }
+    canvas {
+      display: block;
+      background: #000;
+    }
+    .info {
+      color: #eee;
+    }
+    .controls {margin-top: 8px; font-size: 14px}
+    button{
+      margin-top: 10px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: none;
+      background: #2b6;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="board">
+      <canvas id="playfield" width="300" height="600"></canvas>
+    </div>
+    <div class="info">
+      <h2>Tetris</h2>
+      <div>Poäng: <span id="score">0</span></div>
+      <div>Level: <span id="level">1</span></div>
+      <div>Rader: <span id="lines">0</span></div>
+      <h3>Nästa</h3>
+      <canvas id="next" width="120" height="120"></canvas>
+      <div class="controls">
+        <p>Kontroller:</p>
+        <p>← →: flytta, ↑: rotera, ↓: mjuk drop, Space: hård drop, P: pausa</p>
+        <button id="restart">Starta om</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const COLS = 10, ROWS = 20;
+const BLOCK = 30;
+const playCanvas = document.getElementById('playfield');
+const ctx = playCanvas.getContext('2d');
+const nextCanvas = document.getElementById('next');
+const nctx = nextCanvas.getContext('2d');
+
+const scoreEl = document.getElementById('score');
+const levelEl = document.getElementById('level');
+const linesEl = document.getElementById('lines');
+const restartBtn = document.getElementById('restart');
+
+// Ljud
+const sndRotate = new Audio('https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg');
+const sndDrop = new Audio('https://actions.google.com/sounds/v1/foley/plunger_plop.ogg');
+const sndClear = new Audio('https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg');
+
+const SHAPES = {
+  I: [[1,1,1,1]],
+  J: [[1,0,0],[1,1,1]],
+  L: [[0,0,1],[1,1,1]],
+  O: [[1,1],[1,1]],
+  S: [[0,1,1],[1,1,0]],
+  T: [[0,1,0],[1,1,1]],
+  Z: [[1,1,0],[0,1,1]]
+};
+const COLORS = {I:'#00f0f0', J:'#0000f0', L:'#f0a000', O:'#f0f000', S:'#00f000', T:'#a000f0', Z:'#f00000'};
+const keys = {LEFT:37, UP:38, RIGHT:39, DOWN:40, SPACE:32, P:80};
+
+let board, current, next, gameOver, dropInterval, score, level, lines, paused;
+
+function createBoard(){
+  return Array.from({length:ROWS},()=>Array(COLS).fill(0));
+}
+function randomPiece(){
+  const keysArr = Object.keys(SHAPES);
+  const k = keysArr[Math.floor(Math.random()*keysArr.length)];
+  return {shape:SHAPES[k].map(r=>r.slice()), color:COLORS[k], type:k, x:Math.floor((COLS - SHAPES[k][0].length)/2), y:0};
+}
+function drawCell(x,y,color){
+  ctx.fillStyle = color || '#222';
+  ctx.fillRect(x*BLOCK, y*BLOCK, BLOCK-1, BLOCK-1);
+}
+function drawBoard(){
+  ctx.clearRect(0,0,playCanvas.width, playCanvas.height);
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      drawCell(c,r,board[r][c] || '#000');
+    }
+  }
+}
+function drawPiece(piece, ctxToUse=ctx, offsetX=0, offsetY=0, blockSize=BLOCK){
+  for(let r=0;r<piece.shape.length;r++){
+    for(let c=0;c<piece.shape[r].length;c++){
+      if(piece.shape[r][c]){
+        ctxToUse.fillStyle = piece.color;
+        ctxToUse.fillRect((piece.x + c - offsetX)*blockSize, (piece.y + r - offsetY)*blockSize, blockSize-1, blockSize-1);
+      }
+    }
+  }
+}
+function drawNext(){
+  nctx.clearRect(0,0,nextCanvas.width,nextCanvas.height);
+  const size = Math.max(next.shape.length, next.shape[0].length);
+  const offsetX = Math.floor((size - next.shape[0].length)/2);
+  const offsetY = Math.floor((size - next.shape.length)/2);
+  const bs = Math.floor(nextCanvas.width / size);
+  for(let r=0;r<next.shape.length;r++){
+    for(let c=0;c<next.shape[r].length;c++){
+      if(next.shape[r][c]){
+        nctx.fillStyle = next.color;
+        nctx.fillRect((c+offsetX)*bs, (r+offsetY)*bs, bs-2, bs-2);
+      }
+    }
+  }
+}
+function collide(board, piece, nx=piece.x, ny=piece.y){
+  for(let r=0;r<piece.shape.length;r++){
+    for(let c=0;c<piece.shape[r].length;c++){
+      if(piece.shape[r][c]){
+        const x = nx + c;
+        const y = ny + r;
+        if(x<0 || x>=COLS || y>=ROWS) return true;
+        if(y>=0 && board[y][x]) return true;
+      }
+    }
+  }
+  return false;
+}
+function rotate(piece){
+  const s = piece.shape;
+  const h = s.length, w = s[0].length;
+  const res = Array.from({length:w},()=>Array(h).fill(0));
+  for(let r=0;r<h;r++) for(let c=0;c<w;c++) res[c][h-1-r] = s[r][c];
+  return res;
+}
+function lockPiece(){
+  for(let r=0;r<current.shape.length;r++){
+    for(let c=0;c<current.shape[r].length;c++){
+      if(current.shape[r][c]){
+        const x = current.x + c;
+        const y = current.y + r;
+        if(y<0){ gameOver = true; return; }
+        board[y][x] = current.color;
+      }
+    }
+  }
+  clearLines();
+  current = next;
+  current.x = Math.floor((COLS - current.shape[0].length)/2);
+  current.y = 0;
+  next = randomPiece();
+  drawNext();
+}
+function clearLines(){
+  let rowCount = 0;
+  for(let r = ROWS-1; r>=0; r--){
+    if(board[r].every(cell=>cell !== 0)){
+      board.splice(r,1);
+      board.unshift(new Array(COLS).fill(0));
+      rowCount++;
+      r++;
+    }
+  }
+  if(rowCount>0){
+    const points = [0,100,300,500,800];
+    score += points[rowCount] || (rowCount*200);
+    lines += rowCount;
+    level = Math.floor(lines/10) + 1;
+    dropInterval = Math.max(100, 800 - (level-1)*70);
+    sndClear.play();
+    scoreEl.textContent = score;
+    linesEl.textContent = lines;
+    levelEl.textContent = level;
+  }
+}
+function drop(){
+  if(paused || gameOver) return;
+  if(!collide(board, current, current.x, current.y+1)){
+    current.y++;
+  } else {
+    lockPiece();
+    sndDrop.play();
+  }
+  drawBoard();
+  drawPiece(current);
+}
+let lastTime = 0;
+function animate(time=0){
+  if(gameOver){ ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,playCanvas.width,playCanvas.height); ctx.fillStyle='#fff'; ctx.font='24px sans-serif'; ctx.fillText('GAME OVER', 60, 280); return; }
+  if(paused){ ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(0,0,playCanvas.width,playCanvas.height); ctx.fillStyle='#fff'; ctx.font='20px sans-serif'; ctx.fillText('PAUSAD - tryck P för att fortsätta', 10, 280); requestAnimationFrame(animate); return; }
+  const delta = time - lastTime;
+  if(delta > dropInterval){
+    drop();
+    lastTime = time;
+  }
+  drawBoard();
+  drawPiece(current);
+  requestAnimationFrame(animate);
+}
+document.addEventListener('keydown', e=>{
+  if(gameOver) return;
+  switch(e.keyCode){
+    case keys.LEFT:
+      if(!collide(board, current, current.x-1, current.y)) current.x--;
+      break;
+    case keys.RIGHT:
+      if(!collide(board, current, current.x+1, current.y)) current.x++;
+      break;
+    case keys.DOWN:
+      if(!collide(board, current, current.x, current.y+1)) current.y++;
+      break;
+    case keys.UP:
+      const rotated = rotate(current);
+      const oldShape = current.shape;
+      current.shape = rotated;
+      if(collide(board,current,current.x,current.y)) current.shape = oldShape; else sndRotate.play();
+      break;
+    case keys.SPACE:
+      while(!collide(board,current,current.x,current.y+1)) current.y++;
+      lockPiece();
+      sndDrop.play();
+      break;
+    case keys.P:
+      paused = !paused;
+      if(!paused) requestAnimationFrame(animate);
+      break;
+  }
+  drawBoard();
+  drawPiece(current);
+});
+restartBtn.addEventListener('click', init);
+function init(){
+  board = createBoard();
+  current = randomPiece();
+  next = randomPiece();
+  score = 0; lines = 0; level = 1; gameOver = false; paused = false; dropInterval = 800; lastTime = 0;
+  scoreEl.textContent = score; levelEl.textContent = level; linesEl.textContent = lines;
+  drawNext();
+  drawBoard();
+  drawPiece(current);
+  requestAnimationFrame(animate);
+}
+init();
+</script>
+</body>
+</html>
